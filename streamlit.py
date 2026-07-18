@@ -1,11 +1,9 @@
 import streamlit as st
-import openpyxl
-from io import BytesIO
-from typing import NamedTuple, List, Tuple, Optional
 import time
+from typing import NamedTuple, List, Tuple, Optional
 
 # ==========================================
-# 1. CONFIGURATION & CORE DATA STRUCTURES
+# 1. CORE DATA STRUCTURES & CONFIG
 # ==========================================
 EMPTY_CELL = 0
 TARGET_SUM = 10
@@ -19,10 +17,6 @@ class Position(NamedTuple):
     def to_flat_index(self, width: int) -> int:
         return self.row * width + self.col
 
-    @classmethod
-    def from_flat_index(cls, index: int, width: int) -> 'Position':
-        return cls(row=index // width, col=index % width)
-
 
 class Move(NamedTuple):
     pos1: Position
@@ -33,7 +27,6 @@ class Move(NamedTuple):
 
 class Board:
     def __init__(self, grid: List[List[int]]):
-        # Filter out empty rows immediately on load if any exist
         self.grid = [list(row) for row in grid if any(cell != EMPTY_CELL for cell in row)]
         if not self.grid:
             self.grid = [[EMPTY_CELL] * BOARD_WIDTH]
@@ -47,22 +40,15 @@ class Board:
         return tuple(tuple(row) for row in self.grid)
 
     def apply_move(self, move: Move) -> 'Board':
-        """Applies a move and triggers row-collapse if a row becomes empty."""
-        # Create deep copy of current grid
         new_grid = [list(row) for row in self.grid]
-
-        # Clear selected positions
         new_grid[move.pos1.row][move.pos1.col] = EMPTY_CELL
         new_grid[move.pos2.row][move.pos2.col] = EMPTY_CELL
-
-        # DYNAMIC RULE: Filter out rows that are entirely empty (Row-collapse / Shift Up)
         collapsed_grid = [row for row in new_grid if any(cell != EMPTY_CELL for cell in row)]
-
         return Board(collapsed_grid)
 
 
 # ==========================================
-# 2. PATHFINDER ENGINE (WITH SHIFT RULES)
+# 2. OPTIMIZED SOLVER ENGINE
 # ==========================================
 class Pathfinder:
     @staticmethod
@@ -71,14 +57,8 @@ class Pathfinder:
         grid = board.grid
         height = board.height
         width = board.width
+        flat_positions = [Position(r, c) for r in range(height) for c in range(width)]
 
-        # Flatten positions for easy wrapping & linear empty space scanning
-        flat_positions: List[Position] = []
-        for r in range(height):
-            for c in range(width):
-                flat_positions.append(Position(r, c))
-
-        # 1. Horizontal Linear / Row Wrap Checking
         last_pos: Optional[Position] = None
         for pos in flat_positions:
             val = grid[pos.row][pos.col]
@@ -89,15 +69,11 @@ class Pathfinder:
                         moves.append(Move(last_pos, pos, last_val, val))
                 last_pos = pos
 
-        # 2. Geometric 2D Raycasting (Vertical and Diagonals)
-        directions = [(1, 0), (1, 1), (1, -1)]  # Down, Diagonal-Right, Diagonal-Left
-
+        directions = [(1, 0), (1, 1), (1, -1)]
         for r in range(height):
             for c in range(width):
                 val1 = grid[r][c]
-                if val1 == EMPTY_CELL:
-                    continue
-
+                if val1 == EMPTY_CELL: continue
                 p1 = Position(r, c)
                 for dr, dc in directions:
                     nr, nc = r + dr, c + dc
@@ -106,7 +82,7 @@ class Pathfinder:
                         if val2 != EMPTY_CELL:
                             if Pathfinder._is_valid_pair(val1, val2):
                                 moves.append(Move(p1, Position(nr, nc), val1, val2))
-                            break  # Path blocked by another active number
+                            break
                         nr += dr
                         nc += dc
         return moves
@@ -116,9 +92,6 @@ class Pathfinder:
         return v1 == v2 or (v1 + v2) == TARGET_SUM
 
 
-# ==========================================
-# 3. SOLVER CORE (BRANCH & BOUND)
-# ==========================================
 class SolutionScore:
     def __init__(self, remaining_count: int, move_count: int):
         self.remaining_count = remaining_count
@@ -137,7 +110,6 @@ class NumberMatchSolver:
         self.best_sequence: List[Move] = []
         self.best_score = SolutionScore(initial_board.get_remaining_numbers_count(), float('inf'))
         self.max_seconds = max_seconds
-        self.start_time = 0.0
 
     def solve(self) -> List[Move]:
         self.start_time = time.time()
@@ -145,9 +117,7 @@ class NumberMatchSolver:
         return self.best_sequence
 
     def _search(self, current_board: Board, path: List[Move]) -> None:
-        if time.time() - self.start_time > self.max_seconds:
-            return
-
+        if time.time() - self.start_time > self.max_seconds: return
         board_state = current_board.to_tuple()
         remaining = current_board.get_remaining_numbers_count()
         current_score = SolutionScore(remaining_count=remaining, move_count=len(path))
@@ -159,13 +129,10 @@ class NumberMatchSolver:
 
         if board_state in self.transposition_table:
             memoized = self.transposition_table[board_state]
-            if memoized and not current_score.is_better_than(memoized):
-                return
+            if memoized and not current_score.is_better_than(memoized): return
 
         self.transposition_table[board_state] = current_score
         legal_moves = Pathfinder.get_legal_moves(current_board)
-
-        # Performance heuristic: prioritize closer matches
         legal_moves.sort(key=lambda m: abs(m.pos1.to_flat_index(BOARD_WIDTH) - m.pos2.to_flat_index(BOARD_WIDTH)))
 
         for move in legal_moves:
@@ -176,129 +143,135 @@ class NumberMatchSolver:
 
 
 # ==========================================
-# 4. STREAMLIT FRONTEND & INTERACTIVE UI
+# 3. HTML GRID UI RENDERER
 # ==========================================
-st.set_page_config(page_title="Visual Number Match AI", layout="centered")
-
-st.title("🧩 Visual Number Match AI Solver")
-st.write("Upload your layout. The engine automatically handles row-collapsing slides up!")
-
-uploaded_file = st.file_uploader("Upload Game Excel File (.xlsx)", type=["xlsx"])
-
-
 def render_html_board(board_grid: List[List[int]], highlight_move: Optional[Move] = None) -> str:
-    """Renders grid with highlighted target selectors."""
-    html = "<div style='display: grid; grid-template-columns: repeat(9, 42px); gap: 6px; justify-content: center; margin-top: 15px; margin-bottom: 15px;'> wine"
-    html = "<div style='display: grid; grid-template-columns: repeat(9, 42px); gap: 6px; justify-content: center;'>"
-
+    html = "<div style='display: grid; grid-template-columns: repeat(9, 40px); gap: 5px; justify-content: center; margin-top: 10px; margin-bottom: 20px;'>"
     for r in range(len(board_grid)):
         for c in range(BOARD_WIDTH):
             cell = board_grid[r][c]
-
-            # Check if this cell is highlighted in the current step
             is_highlighted = False
-            if highlight_move:
-                if (r == highlight_move.pos1.row and c == highlight_move.pos1.col) or \
-                        (r == highlight_move.pos2.row and c == highlight_move.pos2.col):
-                    is_highlighted = True
+            if highlight_move and ((r == highlight_move.pos1.row and c == highlight_move.pos1.col) or (
+                    r == highlight_move.pos2.row and c == highlight_move.pos2.col)):
+                is_highlighted = True
 
-            # Setup styles
             if cell == EMPTY_CELL:
-                bg_color = "#f0f2f6"
-                text_color = "#ccc"
-                display_val = "•"
-                border = "none"
+                html += "<div style='width: 40px; height: 40px; background-color: #f0f2f6; color: #ccc; border-radius: 6px; display: flex; align-items: center; justify-content: center;'>•</div>"
             elif is_highlighted:
-                bg_color = "#FFD700"  # Bright Gold/Yellow
-                text_color = "#000"
-                display_val = str(cell)
-                border = "3px solid #FF4B4B"
+                html += f"<div style='width: 40px; height: 40px; background-color: #FFD700; color: #000; font-weight: bold; border-radius: 6px; display: flex; align-items: center; justify-content: center; border: 3px solid #FF4B4B; font-size: 16px;'>{cell}</div>"
             else:
-                bg_color = "#4e8cff"  # Normal active cell Blue
-                text_color = "white"
-                display_val = str(cell)
-                border = "none"
-
-            html += f"<div style='width: 42px; height: 42px; background-color: {bg_color}; color: {text_color}; font-weight: bold; border-radius: 6px; display: flex; align-items: center; justify-content: center; border: {border}; font-size: 16px;'>{display_val}</div>"
+                html += f"<div style='width: 40px; height: 40px; background-color: #4e8cff; color: white; font-weight: bold; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 16px;'>{cell}</div>"
     html += "</div>"
     return html
 
 
-if uploaded_file is not None:
-    wb = openpyxl.load_workbook(BytesIO(uploaded_file.read()), data_only=True)
-    sheet = wb.active
+# ==========================================
+# 4. STREAMLIT APP FRONTEND
+# ==========================================
+st.set_page_config(page_title="Number Match Solver", layout="centered")
+st.title("🎯 Mobile Number Match Solver")
+st.write("Configure your active board layout below. Use the control buttons to extend rows dynamically.")
 
-    raw_grid = []
-    for row in sheet.iter_rows(values_only=True):
-        row_vals = []
-        for i in range(BOARD_WIDTH):
-            val = row[i] if i < len(row) else None
-            if val is None or str(val).strip() in ("", "."):
-                row_vals.append(EMPTY_CELL)
-            else:
-                try:
-                    row_vals.append(int(val))
-                except ValueError:
-                    row_vals.append(EMPTY_CELL)
-        raw_grid.append(row_vals)
+if "num_rows" not in st.session_state:
+    st.session_state.num_rows = 5
 
-    # Instantiate Initial State Board Configuration Matrix
-    initial_board = Board(raw_grid)
+st.subheader("📝 Input Your Board Layout")
 
-    st.subheader("📋 Uploaded Starting Layout State")
-    st.markdown(render_html_board(initial_board.grid), unsafe_allow_html=True)
-    st.info(f"Active numbers detected: **{initial_board.get_remaining_numbers_count()}**")
+btn_col1, btn_col2 = st.columns(2)
+with btn_col1:
+    if st.button("➕ Add New Row", use_container_width=True):
+        st.session_state.num_rows += 1
+        st.rerun()
 
-    search_time = st.slider("Search Window Threshold (Seconds)", min_value=2, max_value=15, value=5)
+with btn_col2:
+    if st.button("➖ Remove Last Row", use_container_width=True):
+        if st.session_state.num_rows > 1:
+            st.session_state.num_rows -= 1
+            st.rerun()
 
-    if "solution_steps" not in st.session_state:
-        st.session_state.solution_steps = None
-    if "initial_grids" not in st.session_state:
-        st.session_state.initial_grids = None
+current_input_grid = []
+for r in range(st.session_state.num_rows):
+    cols = st.columns(BOARD_WIDTH)
+    row_vals = []
+    for c in range(BOARD_WIDTH):
+        options = ["•"] + [str(i) for i in range(1, 10)]
+        choice = cols[c].selectbox(
+            f"R{r}C{c}",
+            options=options,
+            index=0,
+            key=f"sel_{r}_{c}",
+            label_visibility="collapsed"
+        )
+        val = EMPTY_CELL if choice == "•" else int(choice)
+        row_vals.append(val)
+    current_input_grid.append(row_vals)
 
-    if st.button("🚀 Calculate Step-by-Step Guide", type="primary"):
-        with st.spinner("Finding paths while simulating row collapses..."):
+st.write("---")
+st.subheader("👁️ Current Matrix Preview")
+st.markdown(render_html_board(current_input_grid), unsafe_allow_html=True)
+
+search_time = st.slider("Search Computational Limit (Seconds)", min_value=2, max_value=15, value=5)
+
+if "solution_steps" not in st.session_state:
+    st.session_state.solution_steps = None
+if "initial_grids" not in st.session_state:
+    st.session_state.initial_grids = None
+if "current_step_idx" not in st.session_state:
+    st.session_state.current_step_idx = 0
+
+if st.button("🚀 Find Winning Sequence", type="primary", use_container_width=True):
+    initial_board = Board(current_input_grid)
+
+    if initial_board.get_remaining_numbers_count() == 0:
+        st.error("Please add data values to the grid before execution!")
+    else:
+        with st.spinner("Calculating optimal moves..."):
             solver = NumberMatchSolver(initial_board, max_seconds=float(search_time))
             moves_list = solver.solve()
 
             if moves_list:
-                # Pre-calculate boards sequence states for manual playback steps
                 grids_history = []
                 temp_board = initial_board
                 for mv in moves_list:
                     grids_history.append(temp_board.grid)
                     temp_board = temp_board.apply_move(mv)
-
                 st.session_state.solution_steps = moves_list
                 st.session_state.initial_grids = grids_history
+                st.session_state.current_step_idx = 0  # Start at the first move
             else:
                 st.session_state.solution_steps = []
                 st.session_state.initial_grids = []
+                st.info("No solution sequence exists for this exact setup.")
 
-    # Display Walkthrough Interface if solutions are loaded in cache memory
-    if st.session_state.solution_steps is not None:
-        if not st.session_state.solution_steps:
-            st.error("No valid moves found within timeframe or left available on board layout.")
-        else:
-            st.success(
-                f"Optimal chain found! Clears down to just {st.session_state.solution_steps[-1].value1 if len(st.session_state.solution_steps) == 0 else 'minimal'} remaining numbers.")
+if st.session_state.solution_steps:
+    st.write("---")
+    st.subheader("🎯 Step-By-Step Interactive Player Guide")
 
-            st.write("---")
-            st.subheader("🎯 Step-By-Step Interactive Player Guide")
+    total_steps = len(st.session_state.solution_steps)
+    curr_idx = st.session_state.current_step_idx
 
-            # Using standard slider configuration tracker to move through game frames manually
-            step_idx = st.slider("Move Playback Selector", min_value=1, max_value=len(st.session_state.solution_steps),
-                                 value=1)
+    # Navigation controls row
+    nav_col1, nav_col2, nav_col3 = st.columns([1, 1, 1])
 
-            current_move = st.session_state.solution_steps[step_idx - 1]
-            current_grid = st.session_state.initial_grids[step_idx - 1]
+    with nav_col1:
+        if st.button("⏮️ Reset", use_container_width=True, disabled=(curr_idx == 0)):
+            st.session_state.current_step_idx = 0
+            st.rerun()
 
-            st.markdown(f"### 📍 Step {step_idx} of {len(st.session_state.solution_steps)}")
-            st.warning(
-                f"👉 **Match the two YELLOW cells** showing values **{current_move.value1}** and **{current_move.value2}**!")
+    with nav_col2:
+        if st.button("⬅️ Previous", use_container_width=True, disabled=(curr_idx == 0)):
+            st.session_state.current_step_idx -= 1
+            st.rerun()
 
-            # Draw the state frame with highlighted targeted coordinate locations
-            st.markdown(render_html_board(current_grid, highlight_move=current_move), unsafe_allow_html=True)
+    with nav_col3:
+        if st.button("Next ➡️", use_container_width=True, disabled=(curr_idx >= total_steps - 1)):
+            st.session_state.current_step_idx += 1
+            st.rerun()
 
-            st.caption(
-                "Notice: If a row becomes empty right after making this match, it disappears, shifting your mobile grid up to match the next step screen above!")
+    # Display current step information
+    current_move = st.session_state.solution_steps[curr_idx]
+    current_grid = st.session_state.initial_grids[curr_idx]
+
+    st.markdown(f"### 📍 Step {curr_idx + 1} of {total_steps}")
+    st.warning(f"👉 Match the two **YELLOW** cells showing **{current_move.value1}** and **{current_move.value2}**!")
+    st.markdown(render_html_board(current_grid, highlight_move=current_move), unsafe_allow_html=True)
