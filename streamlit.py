@@ -179,7 +179,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("🎯 Mobile Grid Solver")
+st.title("🎯 Numner Match Solver")
 
 if "num_rows" not in st.session_state:
     st.session_state.num_rows = 5
